@@ -10,31 +10,47 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // JSON Body Parser
   app.use(express.json());
 
-  // API constraints check
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
   });
 
-  // Proxy Nasdaq Data
-  app.get("/api/nasdaq", async (req, res) => {
+  // Proxy Eastmoney Data for QDII funds
+  app.get("/api/funds", async (req, res) => {
     try {
-      const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/^IXIC?range=1d&interval=5m', {
+      const fundCodes = ["018095", "006282", "019449", "019172"]; // Note: 018095 was an error in my thought earlier?
+      // Wait, 018095 was 博时机器人. I should use 019450 !
+      // Let me fix that.
+      
+      const Fcodes = "019450,006282,019449,019172";
+      
+      // Fetch latest summary for all
+      const summaryRes = await fetch(`https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo?pageIndex=1&pageSize=50&plat=Android&appType=ttjj&product=EFund&Version=1&deviceid=1&Fcodes=${Fcodes}`, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       });
-      if (!response.ok) throw new Error("Failed to fetch data from Yahoo Finance");
+      const summaryData = await summaryRes.json();
       
-      const data = await response.json();
-      res.json(data);
+      // Fetch history for each
+      const historyPromises = ["019450", "006282", "019449", "019172"].map(async (code) => {
+        const histRes = await fetch(`https://fundmobapi.eastmoney.com/FundMNewApi/FundMNHisNetList?FCODE=${code}&pageIndex=1&pageSize=260&plat=Android&appType=ttjj&product=EFund&Version=1&deviceid=1`);
+        const histData = await histRes.json();
+        return { code, history: histData.Datas ? histData.Datas.reverse() : [] }; // reverse to have oldest first
+      });
+      
+      const histories = await Promise.all(historyPromises);
+      const historyMap = histories.reduce((acc, curr) => {
+        acc[curr.code] = curr.history;
+        return acc;
+      }, {});
+      
+      res.json({ summary: summaryData.Datas, history: historyMap });
     } catch (error) {
-      console.error('Error fetching Nasdaq data:', error);
+      console.error('Error fetching Fund data:', error);
       res.status(500).json({ error: String(error) });
     }
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -42,7 +58,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    // Production static serving
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {

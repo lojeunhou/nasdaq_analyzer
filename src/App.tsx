@@ -8,16 +8,37 @@ import ReactMarkdown from 'react-markdown';
 // Initialize Gemini SDK
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-interface DataPoint {
-  time: string;
-  price: number;
-  rawTimestamp: number;
+interface FundSummary {
+  FCODE: string;
+  SHORTNAME: string;
+  PDATE: string;
+  NAV: string;
+  ACCNAV: string;
+  NAVCHGRT: string;
 }
 
+interface FundHistoryItem {
+  FSRQ: string;
+  DWJZ: string;
+  JZZZL: string;
+}
+
+interface FundData {
+  summary: FundSummary[];
+  history: Record<string, FundHistoryItem[]>;
+}
+
+const FUNDS = [
+  { code: '006282', name: '摩根欧洲动力策略股票(QDII)A', slug: '欧洲动力 A' },
+  { code: '019450', name: '摩根欧洲动力策略股票(QDII)C', slug: '欧洲动力 C' },
+  { code: '019449', name: '摩根日本精选股票(QDII)C', slug: '日本精选 C' },
+  { code: '019172', name: '摩根纳斯达克100指数(QDII)A', slug: '纳斯达克100 A' },
+];
+
 export default function App() {
-  const [data, setData] = useState<DataPoint[]>([]);
-  const [currentPrice, setCurrentPrice] = useState<number>(0);
-  const [prevClose, setPrevClose] = useState<number>(1);
+  const [data, setData] = useState<FundData | null>(null);
+  const [selectedFundCode, setSelectedFundCode] = useState<string>('019172');
+  const [timeframe, setTimeframe] = useState<'1M' | '3M' | '1Y'>('3M');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -30,37 +51,15 @@ export default function App() {
     try {
       setIsLoading(true);
       setError(null);
-      const res = await fetch('/api/nasdaq');
+      const res = await fetch('/api/funds');
       if (!res.ok) throw new Error('Failed to fetch data');
       const json = await res.json();
       
-      const result = json?.chart?.result?.[0];
-      if (!result) throw new Error('Invalid data format');
-
-      const timestamps = result.timestamp || [];
-      const closes = result.indicators.quote[0].close || [];
-      const previousClose = result.meta.chartPreviousClose || result.meta.previousClose;
-      
-      const formattedData: DataPoint[] = [];
-      for (let i = 0; i < timestamps.length; i++) {
-        if (closes[i] !== null && closes[i] !== undefined) {
-          formattedData.push({
-            time: format(new Date(timestamps[i] * 1000), 'HH:mm'),
-            price: Number(closes[i].toFixed(2)),
-            rawTimestamp: timestamps[i] * 1000
-          });
-        }
-      }
-
-      if (formattedData.length > 0) {
-        setData(formattedData);
-        setCurrentPrice(formattedData[formattedData.length - 1].price);
-        setPrevClose(Number(previousClose));
-        setLastUpdated(new Date());
-      }
+      setData(json);
+      setLastUpdated(new Date());
     } catch (err) {
       console.error(err);
-      setError('无法获取纳指数据');
+      setError('无法获取基金数据，请稍后重试。');
     } finally {
       setIsLoading(false);
     }
@@ -68,31 +67,23 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
-    // Refresh every 1 minute
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
   }, []);
 
   const generateAIInsight = async () => {
-    if (data.length === 0) return;
+    if (!data) return;
     
     setIsAiLoading(true);
     setAiAnalysis('');
     
     try {
-      const high = Math.max(...data.map(d => d.price));
-      const low = Math.min(...data.map(d => d.price));
-      const change = currentPrice - prevClose;
-      const changePercent = (change / prevClose) * 100;
-      
-      const prompt = `你是专业的华人金融分析师。以下是今日纳斯达克综合指数（Nasdaq Composite, ^IXIC）的最新交易日内部数据切片：
-- 昨日收盘价：${prevClose.toFixed(2)}
-- 当前价格：${currentPrice.toFixed(2)} (${change >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)
-- 今日最高：${high.toFixed(2)}
-- 今日最低：${low.toFixed(2)}
-- 数据点数量：${data.length}
+      let fundsContext = data.summary.map(s => {
+        return `- ${s.SHORTNAME} (${s.FCODE}) 最新净值：${s.NAV} (${Number(s.NAVCHGRT) >= 0 ? '+' : ''}${s.NAVCHGRT}%) [日期: ${s.PDATE}]`;
+      }).join('\\n');
 
-请帮我生成一段实时的市场情绪分析与简短技术面点评（约150-200字）。请直接返回分析内容，不要任何开场白或寒暄。使用专业且精炼的中文。`;
+      const prompt = `你是专业的华人金融分析师。以下是四只摩根海外投资主题 QDII 基金的最新净值与表现：
+${fundsContext}
+
+请根据以上最新表现，为有资产全球化配置需求的高净值客户生成一份专业的实时市场情绪分析与四大标的点评（约200-300字）。请直接返回分析内容，不要任何开场白或寒暄。使用专业且精炼的中文。格式建议采用Markdown格式加粗关键字增强可读性。`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -108,22 +99,46 @@ export default function App() {
     }
   };
 
-  const change = currentPrice - prevClose;
-  const changePercent = (change / prevClose) * 100;
-  const isPositive = change >= 0;
+  const selectedFundSummary = useMemo(() => {
+    if (!data) return null;
+    return data.summary.find(s => s.FCODE === selectedFundCode) || null;
+  }, [data, selectedFundCode]);
 
-  // Chart min/max domain
+  const selectedFundHistory = useMemo(() => {
+    if (!data) return [];
+    return data.history[selectedFundCode] || [];
+  }, [data, selectedFundCode]);
+  
+  const chartData = useMemo(() => {
+    let history = selectedFundHistory;
+    if (timeframe === '1M') {
+      history = history.slice(-22);
+    } else if (timeframe === '3M') {
+      history = history.slice(-65);
+    } else if (timeframe === '1Y') {
+      history = history.slice(-250);
+    }
+
+    return history.map(item => ({
+      time: item.FSRQ.substring(5), // Keep MM-DD
+      price: Number(item.DWJZ),
+    }));
+  }, [selectedFundHistory, timeframe]);
+
+  const changePercent = Number(selectedFundSummary?.NAVCHGRT || 0);
+  const isPositive = changePercent >= 0;
+
   const minPrice = useMemo(() => {
-    if (data.length === 0) return 0;
-    const min = Math.min(...data.map(d => d.price), prevClose);
-    return Math.floor(min * 0.999);
-  }, [data, prevClose]);
+    if (chartData.length === 0) return 0;
+    const min = Math.min(...chartData.map(d => d.price));
+    return min * 0.99;
+  }, [chartData]);
   
   const maxPrice = useMemo(() => {
-    if (data.length === 0) return 0;
-    const max = Math.max(...data.map(d => d.price), prevClose);
-    return Math.ceil(max * 1.001);
-  }, [data, prevClose]);
+    if (chartData.length === 0) return 0;
+    const max = Math.max(...chartData.map(d => d.price));
+    return max * 1.01;
+  }, [chartData]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
@@ -134,7 +149,7 @@ export default function App() {
             <Activity className="w-5 h-5 text-white" />
           </div>
           <h1 className="text-xl font-bold tracking-tight text-slate-800">
-            NASDAQ ANALYZER <span className="text-blue-600">PRO</span>
+            QDII OVERVIEW <span className="text-blue-600">PRO</span>
           </h1>
         </div>
         <div className="flex items-center space-x-6 text-sm font-medium">
@@ -161,41 +176,80 @@ export default function App() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 w-full">
-          {/* Main Chart Area */}
+          {/* Main Content Area */}
           <section className="lg:col-span-3 flex flex-col gap-4">
             
-            {/* Price Card */}
+            {/* Fund Selector & Highlights */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+               {FUNDS.map((fund) => {
+                 const summary = data?.summary.find(s => s.FCODE === fund.code);
+                 const isActive = selectedFundCode === fund.code;
+                 const pct = summary ? Number(summary.NAVCHGRT) : 0;
+                 return (
+                   <button 
+                     key={fund.code}
+                     onClick={() => setSelectedFundCode(fund.code)}
+                     className={`card p-4 rounded-xl flex flex-col items-start transition-all ${isActive ? 'ring-2 ring-blue-500 shadow-md transform -translate-y-0.5 bg-blue-50/10' : 'hover:bg-slate-50'}`}
+                   >
+                     <span className="text-xs font-bold text-slate-500 mb-1 line-clamp-1 text-left">{fund.slug}</span>
+                     {summary ? (
+                       <div className="flex items-end justify-between w-full mt-2">
+                         <span className="text-xl font-bold font-mono">{Number(summary.NAV).toFixed(4)}</span>
+                         <span className={`text-xs font-bold flex items-center ${pct >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                           {pct >= 0 ? '+' : ''}{pct}%
+                         </span>
+                       </div>
+                     ) : (
+                       <div className="flex items-center mt-2 h-[28px]"><RefreshCw className="w-4 h-4 text-slate-300 animate-spin" /></div>
+                     )}
+                   </button>
+                 );
+               })}
+            </div>
+
+            {/* Price Chart Card */}
             <div className="card p-6 rounded-xl flex-1 flex flex-col">
               <div className="flex justify-between items-start mb-6 w-full">
                 <div>
-                  <h2 className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">NASDAQ-100 INDEX (^IXIC)</h2>
+                  <h2 className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">{selectedFundSummary ? selectedFundSummary.SHORTNAME : '---'} ({selectedFundCode})</h2>
                   <div className="flex items-baseline space-x-3">
                     <span className="text-4xl font-extrabold tracking-tighter">
-                      {currentPrice > 0 ? currentPrice.toFixed(2) : '---'}
+                      {selectedFundSummary?.NAV || '---'}
                     </span>
-                    {currentPrice > 0 && (
+                    {selectedFundSummary && (
                       <span className={`font-semibold ${isPositive ? 'text-emerald-500' : 'text-rose-500'}`}>
-                        {isPositive ? '+' : ''}{change.toFixed(2)} ({isPositive ? '+' : ''}{changePercent.toFixed(2)}%)
+                        {isPositive ? <TrendingUp className="inline w-4 h-4 mr-1"/> : <TrendingDown className="inline w-4 h-4 mr-1"/>}
+                        {isPositive ? '+' : ''}{changePercent.toFixed(2)}%
                       </span>
                     )}
                   </div>
+                  <div className="text-xs text-slate-400 mt-2 font-mono">AS OF {selectedFundSummary?.PDATE || '----'}</div>
                 </div>
                 <div className="flex bg-slate-100 p-1 rounded-lg">
-                  <button className="px-3 py-1 text-xs font-semibold bg-white rounded shadow-sm text-slate-800">1D</button>
-                  <button className="px-3 py-1 text-xs font-semibold text-slate-500 opacity-50 cursor-not-allowed">1W</button>
-                  <button className="px-3 py-1 text-xs font-semibold text-slate-500 opacity-50 cursor-not-allowed">1M</button>
+                  <button 
+                    onClick={() => setTimeframe('1M')}
+                    className={`px-3 py-1 text-xs font-semibold rounded shadow-sm transition-colors ${timeframe === '1M' ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                  >1M</button>
+                  <button 
+                    onClick={() => setTimeframe('3M')}
+                    className={`px-3 py-1 text-xs font-semibold rounded shadow-sm transition-colors ${timeframe === '3M' ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                  >3M</button>
+                  <button 
+                    onClick={() => setTimeframe('1Y')}
+                    className={`px-3 py-1 text-xs font-semibold rounded shadow-sm transition-colors ${timeframe === '1Y' ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                  >1Y</button>
                 </div>
               </div>
 
               {/* Chart */}
               <div className="h-64 sm:h-80 lg:h-96 w-full mt-2 relative">
-                {isLoading && data.length === 0 ? (
+                {isLoading || chartData.length === 0 ? (
                   <div className="h-full w-full flex items-center justify-center text-slate-400">
                     <RefreshCw className="w-6 h-6 animate-spin" />
                   </div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={data} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                    <AreaChart data={chartData} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
                       <defs>
                         <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#3B82F6" stopOpacity={0.2}/>
@@ -217,7 +271,7 @@ export default function App() {
                         tick={{fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono'}}
                         tickLine={false}
                         axisLine={false}
-                        tickFormatter={(val) => Math.round(val).toString()}
+                        tickFormatter={(val) => val.toFixed(4)}
                       />
                       <Tooltip 
                         contentStyle={{ backgroundColor: 'white', borderColor: '#E2E8F0', borderRadius: '8px', color: '#0f172a', fontSize: '12px', fontFamily: 'JetBrains Mono', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.05)' }}
@@ -236,26 +290,6 @@ export default function App() {
                     </AreaChart>
                   </ResponsiveContainer>
                 )}
-              </div>
-
-              {/* Data Summary Grid */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 border-t border-slate-100 pt-4 mt-4">
-                <div className="text-center border-r md:border-slate-100 border-transparent">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Prev Close</p>
-                  <p className="font-mono font-semibold">{prevClose.toFixed(2)}</p>
-                </div>
-                <div className="text-center md:border-r border-slate-100">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Open</p>
-                  <p className="font-mono font-semibold">{data.length > 0 ? data[0].price.toFixed(2) : '---'}</p>
-                </div>
-                <div className="text-center border-r md:border-slate-100 border-transparent">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Low</p>
-                  <p className="font-mono font-semibold text-rose-500">{data.length > 0 ? Math.min(...data.map(d => d.price)).toFixed(2) : '---'}</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">High</p>
-                  <p className="font-mono font-semibold text-emerald-500">{data.length > 0 ? Math.max(...data.map(d => d.price)).toFixed(2) : '---'}</p>
-                </div>
               </div>
             </div>
             
@@ -277,7 +311,7 @@ export default function App() {
                 ) : (
                   <div className="flex-grow flex flex-col items-center justify-center text-slate-400 text-center px-4 space-y-4">
                     <Sparkles className="w-8 h-8 opacity-20" />
-                    <p className="text-xs font-medium">Generate real-time market sentiment and technical feedback.</p>
+                    <p className="text-xs font-medium">Generate real-time global market sentiment and cross-asset feedback.</p>
                   </div>
                 )}
               </div>
@@ -285,8 +319,8 @@ export default function App() {
               <div className="mt-4 pt-4 border-t border-slate-100">
                 <button
                   onClick={generateAIInsight}
-                  disabled={isAiLoading || data.length === 0}
-                  className="w-full py-2.5 px-4 rounded flex items-center justify-center gap-2 text-xs font-bold bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors text-white uppercase tracking-wider"
+                  disabled={isAiLoading || !data}
+                  className="w-full py-2.5 px-4 rounded flex items-center justify-center gap-2 text-xs font-bold bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors text-white uppercase tracking-wider shadow-sm"
                 >
                   {isAiLoading ? (
                     <>
