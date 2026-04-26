@@ -16,6 +16,32 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Proxy Yahoo Finance for intraday index data
+  app.get("/api/intraday", async (req, res) => {
+    try {
+      const fundCode = req.query.code;
+      // Map fund codes to Yahoo Finance indices
+      const indexMap: Record<string, string> = {
+        '019172': '^NDX',   // Nasdaq 100
+        '006282': '^STOXX', // Europe 600
+        '019449': '^N225',  // Nikkei 225
+        '019450': '^STOXX', // Europe 600
+      };
+      const ticker = typeof fundCode === 'string' ? indexMap[fundCode] || '^NDX' : '^NDX';
+      
+      const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1d&interval=5m`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      if (!response.ok) throw new Error("Failed to fetch data from Yahoo Finance");
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error('Error fetching Intraday data:', error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
   // Proxy Eastmoney Data for QDII funds
   app.get("/api/funds", async (req, res) => {
     try {

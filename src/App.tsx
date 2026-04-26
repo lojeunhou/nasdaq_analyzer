@@ -38,7 +38,9 @@ const FUNDS = [
 export default function App() {
   const [data, setData] = useState<FundData | null>(null);
   const [selectedFundCode, setSelectedFundCode] = useState<string>('019172');
-  const [timeframe, setTimeframe] = useState<'1M' | '3M' | '1Y'>('3M');
+  const [timeframe, setTimeframe] = useState<'1D' | '1M' | '3M' | '1Y'>('1D');
+  const [intradayData, setIntradayData] = useState<Record<string, { time: string, price: number }[]>>({});
+  const [isIntradayLoading, setIsIntradayLoading] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -65,9 +67,46 @@ export default function App() {
     }
   };
 
+  const fetchIntraday = async (code: string) => {
+    try {
+      setIsIntradayLoading(true);
+      const res = await fetch(`/api/intraday?code=${code}`);
+      if (!res.ok) return;
+      
+      const json = await res.json();
+      const result = json?.chart?.result?.[0];
+      if (!result) return;
+
+      const timestamps = result.timestamp || [];
+      const closes = result.indicators?.quote?.[0]?.close || [];
+      
+      const formattedData: { time: string, price: number }[] = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        if (closes[i] !== null && closes[i] !== undefined) {
+          formattedData.push({
+            time: format(new Date(timestamps[i] * 1000), 'HH:mm'),
+            price: Number(closes[i].toFixed(2))
+          });
+        }
+      }
+
+      setIntradayData(prev => ({ ...prev, [code]: formattedData }));
+    } catch (err) {
+      console.error('Error fetching intraday', err);
+    } finally {
+      setIsIntradayLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, []);
+
+  useEffect(() => {
+    if (selectedFundCode && !intradayData[selectedFundCode]) {
+      fetchIntraday(selectedFundCode);
+    }
+  }, [selectedFundCode]);
 
   const generateAIInsight = async () => {
     if (!data) return;
@@ -110,6 +149,10 @@ ${fundsContext}
   }, [data, selectedFundCode]);
   
   const chartData = useMemo(() => {
+    if (timeframe === '1D') {
+      return intradayData[selectedFundCode] || [];
+    }
+    
     let history = selectedFundHistory;
     if (timeframe === '1M') {
       history = history.slice(-22);
@@ -123,7 +166,7 @@ ${fundsContext}
       time: item.FSRQ.substring(5), // Keep MM-DD
       price: Number(item.DWJZ),
     }));
-  }, [selectedFundHistory, timeframe]);
+  }, [selectedFundHistory, timeframe, intradayData, selectedFundCode]);
 
   const changePercent = Number(selectedFundSummary?.NAVCHGRT || 0);
   const isPositive = changePercent >= 0;
@@ -139,6 +182,15 @@ ${fundsContext}
     const max = Math.max(...chartData.map(d => d.price));
     return max * 1.01;
   }, [chartData]);
+
+  const periodOpen = chartData.length > 0 ? chartData[0].price : null;
+  const periodHigh = chartData.length > 0 ? Math.max(...chartData.map(d => d.price)) : null;
+  const periodLow = chartData.length > 0 ? Math.min(...chartData.map(d => d.price)) : null;
+
+  const displayPrice = (val: number | null) => {
+    if (val === null) return '---';
+    return val > 100 ? val.toFixed(2) : val.toFixed(4);
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
@@ -227,6 +279,10 @@ ${fundsContext}
                 </div>
                 <div className="flex bg-slate-100 p-1 rounded-lg">
                   <button 
+                    onClick={() => setTimeframe('1D')}
+                    className={`px-3 py-1 text-xs font-semibold rounded shadow-sm transition-colors ${timeframe === '1D' ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
+                  >1D</button>
+                  <button 
                     onClick={() => setTimeframe('1M')}
                     className={`px-3 py-1 text-xs font-semibold rounded shadow-sm transition-colors ${timeframe === '1M' ? 'bg-white text-slate-800' : 'text-slate-500 hover:text-slate-700 hover:bg-white/50'}`}
                   >1M</button>
@@ -243,7 +299,7 @@ ${fundsContext}
 
               {/* Chart */}
               <div className="h-64 sm:h-80 lg:h-96 w-full mt-2 relative">
-                {isLoading || chartData.length === 0 ? (
+                {(isLoading && timeframe !== '1D') || (isIntradayLoading && timeframe === '1D') || chartData.length === 0 ? (
                   <div className="h-full w-full flex items-center justify-center text-slate-400">
                     <RefreshCw className="w-6 h-6 animate-spin" />
                   </div>
@@ -271,7 +327,7 @@ ${fundsContext}
                         tick={{fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono'}}
                         tickLine={false}
                         axisLine={false}
-                        tickFormatter={(val) => val.toFixed(4)}
+                        tickFormatter={(val) => val > 100 ? val.toFixed(0) : val.toFixed(4)}
                       />
                       <Tooltip 
                         contentStyle={{ backgroundColor: 'white', borderColor: '#E2E8F0', borderRadius: '8px', color: '#0f172a', fontSize: '12px', fontFamily: 'JetBrains Mono', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.05)' }}
@@ -290,6 +346,26 @@ ${fundsContext}
                     </AreaChart>
                   </ResponsiveContainer>
                 )}
+              </div>
+
+              {/* Data Summary Panel */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 border-t border-slate-100 pt-4 mt-4">
+                <div className="text-center border-r md:border-slate-100 border-transparent hover:bg-slate-50 rounded-lg p-2 transition-colors">
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1 tracking-wider">Period Open</p>
+                  <p className="font-mono font-semibold text-lg">{displayPrice(periodOpen)}</p>
+                </div>
+                <div className="text-center md:border-r border-slate-100 hover:bg-slate-50 rounded-lg p-2 transition-colors">
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1 tracking-wider">Period High</p>
+                  <p className="font-mono font-semibold text-emerald-500 text-lg">{displayPrice(periodHigh)}</p>
+                </div>
+                <div className="text-center border-r md:border-slate-100 border-transparent hover:bg-slate-50 rounded-lg p-2 transition-colors">
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1 tracking-wider">Period Low</p>
+                  <p className="font-mono font-semibold text-rose-500 text-lg">{displayPrice(periodLow)}</p>
+                </div>
+                <div className="text-center hover:bg-slate-50 rounded-lg p-2 transition-colors">
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1 tracking-wider">Accumulated NAV</p>
+                  <p className="font-mono font-semibold text-blue-500 text-lg">{selectedFundSummary ? Number(selectedFundSummary.ACCNAV).toFixed(4) : '---'}</p>
+                </div>
               </div>
             </div>
             
